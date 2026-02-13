@@ -1,0 +1,703 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/sqlite"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ======================
+// Loja / Produtos / Benefícios temporários
+// ======================
+
+model Product {
+  id           String   @id @default(cuid())
+  sku          String   @unique
+  name         String
+  description  String?
+  priceCents   Int
+  currency     String   @default("BRL")
+  durationDays Int? // duração do VIP/benefício (dias)
+  grantPoints  Int      @default(0)
+  grantVipRole String? // APOIADOR | INVESTIDOR | PATROCINADOR (visual)
+  // ações para MTA (JSON)
+  // SQLite connector (Prisma) não suporta Json: armazenamos como string JSON.
+  mtaActions   String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  purchaseItems PurchaseItem[]
+}
+
+model Coupon {
+  id             String    @id @default(cuid())
+  code           String    @unique
+  percentOff     Int? // 0-100
+  amountOffCents Int?
+  maxUses        Int?
+  uses           Int       @default(0)
+  expiresAt      DateTime?
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+}
+
+model PurchaseItem {
+  id           String  @id @default(cuid())
+  purchaseId   String
+  productId    String
+  sku          String
+  name         String
+  priceCents   Int
+  durationDays Int?
+  grantPoints  Int     @default(0)
+  grantVipRole String?
+  // SQLite connector (Prisma) não suporta Json: armazenamos como string JSON.
+  mtaActions   String?
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseId])
+  @@index([productId])
+}
+
+model Entitlement {
+  id        String   @id @default(cuid())
+  userId    String
+  roleName  String
+  expiresAt DateTime
+  source    String? // purchaseId/weekly
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([roleName, expiresAt])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  message   String
+  href      String? // destino ao clicar (ex: /tickets/123)
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+}
+
+// ======================
+// Staff - bate ponto + ranking semanal
+// ======================
+
+model StaffShift {
+  id        String    @id @default(cuid())
+  userId    String
+  openedAt  DateTime
+  closedAt  DateTime?
+  seconds   Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, openedAt])
+  @@index([closedAt])
+}
+
+model StaffWeeklyReward {
+  id        String   @id @default(cuid())
+  userId    String
+  position  Int
+  weekKey   String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, weekKey])
+  @@index([weekKey, position])
+}
+
+// ======================
+// Administração: Ban / Advertência
+// ======================
+
+model AdminCase {
+  id           String    @id @default(cuid())
+  targetUserId String
+  staffUserId  String
+  type         String // BAN | WARN
+  reason       String
+  expiresAt    DateTime?
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+
+  targetUser User @relation("AdminTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  staffUser  User @relation("AdminStaff", fields: [staffUserId], references: [id], onDelete: Cascade)
+
+  @@index([targetUserId, type, active])
+  @@index([expiresAt])
+}
+
+model UserReputation {
+  userId    String   @id
+  score     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([score])
+}
+
+model User {
+  id                   String    @id @default(cuid())
+  email                String    @unique
+  username             String    @unique
+  passwordHash         String
+  emailVerifiedAt      DateTime?
+  emailVerifyToken     String?
+  emailVerifyExpiresAt DateTime?
+  phone                String?
+  recoveryEmail        String?
+  googleId             String?   @unique
+  discordId            String?   @unique
+  discordUsername      String?
+  avatarKey            String    @default("avatar1")
+  role                 String    @default("USER") // cargo principal (compatível com RBAC por rank)
+  isDeleted            Boolean   @default(false)
+  bannedUntil          DateTime?
+  whitelistStatus      String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  points               Int       @default(0)
+  lastSeenAt           DateTime  @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  topics                  Topic[]
+  posts                   Post[]
+  tickets                 Ticket[]            @relation("TicketAuthor")
+  assignedTickets         Ticket[]            @relation("TicketAssignee")
+  ticketMsgs              TicketMessage[]
+  ticketParticipants      TicketParticipant[]
+  // Participações em tickets adicionadas por um staff (oposto de TicketParticipant.addedBy)
+  ticketParticipantsAdded TicketParticipant[] @relation("TicketParticipantAddedBy")
+  ticketRatingsGiven      TicketRating[]      @relation("TicketRatingRater")
+  ticketRatingsReceived   TicketRating[]      @relation("TicketRatingTarget")
+  closedTickets           Ticket[]            @relation("TicketClosedBy")
+  purchases               Purchase[]
+  auditLogs               AuditLog[]          @relation("ActorAuditLogs")
+
+  userRoles          UserRole[]
+  whitelistApps      WhitelistApplication[]
+  reviewedWhitelists WhitelistApplication[] @relation("WhitelistReviewer")
+
+  convoParts       ConversationParticipant[]
+  sentMessages     DirectMessage[]           @relation("DM_Sender")
+  receivedMessages DirectMessage[]           @relation("DM_Receiver")
+
+  userBadges   UserBadge[]
+  gameAccounts GameAccount[]
+
+  // Logs de acesso/consulta do endpoint MTA (oposto de MtaAccessLog.user)
+  mtaAccessLogs MtaAccessLog[]
+
+  // Avatar enviado pelo usuário (upload). Se nulo, usa avatarKey.
+  avatarUrl String?
+
+  // Requisitos de avaliação (workflow de fechamento de tickets)
+  ticketRatingReqGiven    TicketRatingRequirement[] @relation("TicketRatingReqRater")
+  ticketRatingReqReceived TicketRatingRequirement[] @relation("TicketRatingReqTarget")
+
+  // Recuperação de senha
+  passwordResetTokens PasswordResetToken[]
+
+  // Beneficios temporarios / loja
+  entitlements  Entitlement[]
+  notifications Notification[]
+
+  // Staff - ponto
+  staffShifts        StaffShift[]
+  staffWeeklyRewards StaffWeeklyReward[]
+
+  // Admin cases (ban/warn)
+  adminCasesTarget AdminCase[] @relation("AdminTarget")
+  adminCasesStaff  AdminCase[] @relation("AdminStaff")
+
+  // Reputacao
+  reputation UserReputation?
+
+  @@index([role])
+  @@index([isDeleted])
+  @@index([bannedUntil])
+  @@index([whitelistStatus])
+  @@index([lastSeenAt])
+}
+
+model ForumCategory {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  order       Int          @default(0)
+  createdAt   DateTime     @default(now())
+  boards      ForumBoard[]
+}
+
+model ForumBoard {
+  id               String  @id @default(cuid())
+  categoryId       String
+  name             String
+  description      String?
+  order            Int     @default(0)
+  // Opções de moderação/config
+  requireWhitelist Boolean @default(false)
+  pointsOnTopic    Int     @default(5)
+  pointsOnReply    Int     @default(1)
+  allowReplies     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  category ForumCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  topics   Topic[]
+}
+
+model Topic {
+  id         String   @id @default(cuid())
+  boardId    String
+  authorId   String
+  title      String
+  status     String   @default("OPEN") // OPEN | LOCKED | LOCKED_ADMIN
+  pinned     Boolean  @default(false)
+  isDeleted  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  lastPostAt DateTime @default(now())
+
+  board  ForumBoard @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  author User       @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  posts  Post[]
+
+  @@index([boardId, pinned, lastPostAt])
+  @@index([authorId])
+  @@index([isDeleted])
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  topicId   String
+  authorId  String
+  content   String
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  topic       Topic            @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  author      User             @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  attachments PostAttachment[]
+
+  @@index([topicId, createdAt])
+  @@index([isDeleted])
+}
+
+model PostAttachment {
+  id        String   @id @default(cuid())
+  postId    String
+  url       String
+  mime      String?
+  size      Int?
+  createdAt DateTime @default(now())
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+}
+
+model TicketCategory {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  tickets Ticket[]
+}
+
+model Ticket {
+  id           String    @id @default(cuid())
+  categoryId   String
+  authorId     String
+  title        String
+  status       String    @default("OPEN") // OPEN | WAITING | RESOLVED | CLOSED
+  priority     String    @default("MEDIUM") // LOW | MEDIUM | HIGH
+  assignedToId String?
+  isDeleted    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  closedAt     DateTime?
+  closedById   String?
+
+  category           TicketCategory            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  author             User                      @relation("TicketAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  assignedTo         User?                     @relation("TicketAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  closedBy           User?                     @relation("TicketClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  messages           TicketMessage[]
+  participants       TicketParticipant[]
+  ratings            TicketRating[]
+  ratingRequirements TicketRatingRequirement[]
+
+  @@index([status, updatedAt])
+  @@index([authorId])
+  @@index([assignedToId])
+  @@index([isDeleted])
+}
+
+model TicketMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  authorId  String
+  content   String
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, createdAt])
+  @@index([isDeleted])
+}
+
+model Purchase {
+  id          String   @id @default(cuid())
+  userId      String
+  provider    String
+  externalId  String?
+  status      String   @default("PENDING") // PENDING | PAID | FAILED | REFUNDED
+  amountCents Int
+  currency    String   @default("BRL")
+  meta        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  items PurchaseItem[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+  ip         String?
+  userAgent  String?
+  meta       String?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([action])
+  @@index([entityType, entityId])
+}
+
+model MpWebhookEvent {
+  id         String   @id @default(cuid())
+  eventType  String?
+  externalId String?
+  payload    String
+  processed  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([processed, createdAt])
+}
+
+// ======================
+// RBAC dinâmico (cargos/permissões gerenciáveis)
+// ======================
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique // ex: "VIP", "WHITELIST_STAFF"
+  rank        Int      @default(1) // para ordenação/nível
+  category    String   @default("CUSTOM") // ex: SYSTEM | VIP | SHOP | FORUM | CUSTOM
+  description String?
+  createdAt   DateTime @default(now())
+
+  permissions RolePermission[]
+  users       UserRole[]
+  colorHex    String?
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique // ex: "forum.topic.delete"
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+// ======================
+// Whitelist
+// ======================
+model WhitelistConfig {
+  id           String    @id @default("singleton")
+  enabled      Boolean   @default(true)
+  pausedUntil  DateTime?
+  successTitle String    @default("Whitelist aprovada!")
+  successBody  String    @default("Bem-vindo(a)! Sua whitelist foi aprovada.")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model WhitelistQuestion {
+  id        String   @id @default(cuid())
+  prompt    String
+  required  Boolean  @default(true)
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  answers WhitelistAnswer[]
+}
+
+model WhitelistApplication {
+  id           String    @id @default(cuid())
+  userId       String
+  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  reviewerId   String?
+  rejectReason String?
+  createdAt    DateTime  @default(now())
+  reviewedAt   DateTime?
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reviewer User?             @relation("WhitelistReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  answers  WhitelistAnswer[]
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+model WhitelistAnswer {
+  id            String   @id @default(cuid())
+  applicationId String
+  questionId    String
+  value         String
+  createdAt     DateTime @default(now())
+
+  application WhitelistApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  question    WhitelistQuestion    @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+}
+
+// ======================
+// Badges / Emblemas
+// ======================
+model Badge {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  icon        String? // pode ser emoji ou nome de ícone
+  createdAt   DateTime @default(now())
+
+  users UserBadge[]
+}
+
+model UserBadge {
+  userId    String
+  badgeId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge Badge @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@id([userId, badgeId])
+}
+
+// ======================
+// Mensagens privadas
+// ======================
+model Conversation {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants ConversationParticipant[]
+  messages     DirectMessage[]
+}
+
+model ConversationParticipant {
+  conversationId String
+  userId         String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId])
+}
+
+model DirectMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderId       String
+  receiverId     String
+  content        String
+  kind           String   @default("NORMAL") // NORMAL | WARNING
+  isDeleted      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("DM_Sender", fields: [senderId], references: [id], onDelete: Restrict)
+  receiver     User         @relation("DM_Receiver", fields: [receiverId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, createdAt])
+  @@index([receiverId, createdAt])
+  @@index([isDeleted])
+}
+
+// ======================
+// Dados bancários (somente OWNER)
+// ======================
+model BankInfo {
+  id            String   @id @default(cuid())
+  label         String
+  holderName    String?
+  pixKey        String?
+  bankName      String?
+  agency        String?
+  accountNumber String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model GameAccount {
+  id                   String   @id @default(cuid())
+  userId               String   @unique
+  mtaSerial            String   @unique
+  mtaAccount           String?
+  locked               Boolean  @default(false)
+  changedAfterApproved Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ======================
+// Tickets: participantes e avaliação
+// ======================
+model TicketParticipant {
+  ticketId  String
+  userId    String
+  addedById String?
+  createdAt DateTime @default(now())
+
+  ticket  Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User?  @relation("TicketParticipantAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@id([ticketId, userId])
+  @@index([userId])
+}
+
+model TicketRating {
+  id           String   @id @default(cuid())
+  ticketId     String
+  raterUserId  String
+  targetUserId String
+  stars        Int
+  feedback     String
+  createdAt    DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  rater  User   @relation("TicketRatingRater", fields: [raterUserId], references: [id], onDelete: Cascade)
+  target User   @relation("TicketRatingTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@unique([ticketId, raterUserId, targetUserId])
+  @@index([ticketId, createdAt])
+  @@index([targetUserId, createdAt])
+}
+
+// ======================
+// MTA: logs de consulta
+// ======================
+model MtaAccessLog {
+  id        String   @id @default(cuid())
+  serial    String
+  userId    String?
+  allowed   Boolean
+  reason    String?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([serial, createdAt])
+  @@index([createdAt])
+}
+
+model TicketRatingRequirement {
+  id        String   @id @default(cuid())
+  ticketId  String
+  raterId   String
+  targetId  String
+  completed Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  rater  User   @relation("TicketRatingReqRater", fields: [raterId], references: [id], onDelete: Cascade)
+  target User   @relation("TicketRatingReqTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([ticketId, raterId, targetId])
+  @@index([ticketId, completed])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  code      String // código de 6 dígitos (hash ou texto em dev)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([usedAt])
+}
