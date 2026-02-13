@@ -27,8 +27,17 @@ export async function POST(req: Request) {
     await prisma.staffShift.delete({ where: { id: openShift.id } });
     await audit("staff.timeclock.forceCancel", "StaffShift", openShift.id, { actor: actor.id, targetId: target.id }).catch(() => null);
 
-    await prisma.notification.create({ data: { userId, message: "Seu ponto foi cancelado por " + me.username, href: "/admin/staff" } }).catch(() => null);
-  return NextResponse.json({ ok: true });
+    await prisma.notification
+      .create({
+        data: {
+          userId: target.id,
+          message: `Seu ponto foi cancelado por ${actor.username}`,
+          href: "/admin/staff",
+        },
+      })
+      .catch(() => null);
+
+    return NextResponse.json({ ok: true });
   } catch (e: any) {
     if (String(e?.message) === "UNAUTHORIZED") return NextResponse.json({ message: "Faça login." }, { status: 401 });
     return NextResponse.json({ message: "Erro interno." }, { status: 500 });
